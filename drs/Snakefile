@@ -1,0 +1,344 @@
+REFERENCE_SEQUENCE = '/qbio/nest/ari/works/hcmv/refs/HCMV-Toledo.fasta'
+REFERENCE_INDEX='../refs/GRCh38.p13.Toledo.ont.hv.mm2.idx'
+
+import pandas as pd
+import numpy as np
+
+
+SAMPLES='hcmv_latent_1 hcmv_react_1 hcmv_latent_2 hcmv_react_2 hcmv_lytic_1'.split(' ')
+
+TYPES='hcmv_latent hcmv_react hcmv_lytic'.split(' ')
+LNC_NAMES='RNA2.7 RNA1.2 RNA4.9 RNA5.0'.split(' ')
+ELIGOS_OUTPUT_TYPES = '''
+    baseExt0 baseExt1 baseExt2 combine
+'''.split()
+POS=[2364, 2446, 2650, 2660, 2670, 2690, 2700, 2785, 2921, 3019, 3039, 3770,
+       4273, 4399, 4837,
+       6637, 6704, 6940, 6969, 7012, 7090, 7134, 7167, 7287, 7531, 7626, 7645,
+       94049, 94059, 94307, 94547, 95896, 95912, 96192, 96366, 97089, 97602,
+        97657, 97850, 97865,  97887, 97896, 98154, 98861, 98868,
+        156057]
+
+
+rule all:
+	input:
+		expand('alignments/{name}.sorted.bam.bai', name=SAMPLES),
+		expand('subread/{name}_count', name=SAMPLES),
+		expand('alignments/{name}.sorted.v.bam.bai', name=SAMPLES),
+		expand('subread/{name}.v_count', name=SAMPLES),
+		expand('stats/{name}.v.cov.txt', name=SAMPLES),
+		#expand('stats/{name}.{strand}.cov.txt', name=SAMPLES, 
+strand=['+', '-']),
+		expand('stats/salmon_quant_{name}/quant.sf', name=SAMPLES),		
+		expand('trannot/{name}_{lnc_name}.idx.txt',name=SAMPLES, lnc_name=LNC_NAMES),
+		expand('stats/{name}.t.bed', name=SAMPLES),
+		expand('stats/{name}.v.bed', name=SAMPLES),
+		expand('stats/{name}.v.intersect.bed', name=SAMPLES),
+		expand('eligos2/pairdiff/{name}/combine.txt', name=SAMPLES),	
+		expand('eligos2/pairdiff/{name}/{diffname}.filtered.txt', name=SAMPLES, diffname=ELIGOS_OUTPUT_TYPES),
+
+		expand('guppy_subset/{name}/sequencing_summary.txt', name=SAMPLES),
+		expand('guppy_subset/{name}_single/.tombo.CoV.indexed', name=SAMPLES),
+      		expand('tombo/{type}.stats/modelcompare.tombo.per_read_stats', type=TYPES),
+		expand('nanopolish_all/{name}/polyA.tsv', name=SAMPLES),
+		#expand('nanocompore/{name}/eventalign_collapsed.tsv', name=SAMPLES),
+		#expand('guppy_subset/{name}_single/.tombo.CoV.indexed', name=SAMPLES),
+		#expand('alignment_subset/{name}.lnc.sorted.bam', name=SAMPLES),			
+		#expand('python_output/mapped_{name}_{pos}.pickle', name=SAMPLES, pos=POS),
+		#expand('eligos2/pairdiff/{type}/combine.txt', type=TYPES),
+      		#expand('eligos2/pairdiff/{type}/{diffname}.filtered.txt', type=TYPES, diffname=ELIGOS_OUTPUT_TYPES),
+rule align_genome:
+	input:'sequences/{name}.fastq.gz'
+    	output: 'alignments/{name}.sorted.bam'
+    	threads: 36
+    	shell:('minimap2 --MD -a -x splice -N 32 -un -t {threads} {REFERENCE_INDEX} {input}\
+               | samtools sort -@ 4 -o {output}')
+
+rule index:
+	input: 'alignments/{name}.sorted.bam'
+    	output: 'alignments/{name}.sorted.bam.bai'
+    	shell: 'samtools index {input}'
+viral_genome = 'GU937742.2'
+rule make_viral_subset:
+	input: allreads='sequences/{name}.fastq.gz', 
+		alignments='alignments/{name}.sorted.bam',
+		index='alignments/{name}.sorted.bam.bai'
+	output: subsetfastq='sequences/{name}.viral.fastq.gz',
+        	readids=temp('tmp/{name}.viral-reads')
+	run:
+		shell('samtools view {input.alignments} {viral_genome} | cut -f1 | sort | \
+                    uniq > {output.readids}')
+		shell('seqtk subseq {input.allreads} {output.readids} | \
+                   bgzip -@ {threads} -c /dev/stdin > {output.subsetfastq}')
+rule featurecount:
+	input: 'alignments/{name}.sorted.bam'
+	output: 'subread/{name}_count'
+	threads: 5
+	shell: 'featureCounts -a ../refs/GRCh38.p13.Toledo.gff3 -o {output} {input} -L -T {threads}'
+
+rule map_reads_viral_genome:
+    input:
+        seqs='sequences/{name}.viral.fastq.gz',
+    output: 'alignments/{name,[^.]+}.sorted.v.bam'
+    threads: 36
+    shell: 'minimap2 -k 8 -w 1 --splice -g 30000 -G 30000 -A1 -B2 -O2,24 -E1,0 \
+                -C0 -z 400,200 --no-end-flt --junc-bonus=100 -F 40000 -N 32 \
+                --splice-flank=no --max-chain-skip=40 -un \
+                --junc-bonus=50 --MD -a -p 0.7 \
+                -t {threads} {REFERENCE_SEQUENCE} {input.seqs} | samtools sort -@ 4 -o {output}'
+
+rule index_viral_genome:
+	input: 'alignments/{name}.sorted.v.bam'
+	output: 'alignments/{name}.sorted.v.bam.bai'
+	shell: 'samtools index {input}'
+
+rule virus_featurecount:
+        input: 'alignments/{name}.sorted.v.bam'
+        output: 'subread/{name}.v_count'
+        threads: 5
+        shell: 'featureCounts -a ../refs/GRCh38.p13.Toledo.gff3 -o {output} {input} -L -T {threads}'
+
+rule align_transcriptome:
+    input: seqs='sequences/{name}.fastq.gz', idx='../refs/GRCh38.p13.Toledo.transcripts.mm2.idx'
+    output: 'alignments/{name}.sorted.t.bam'
+    threads: 20
+    shell: 'minimap2 -K5g  -uf --MD -ax splice -N 20 -un -t {threads} {input.idx} {input.seqs}|samtools sort -o {output}'
+
+rule index_transcriptome:
+	input: 'alignments/{name}.sorted.t.bam'
+    	output: 'alignments/{name}.sorted.t.bam.bai'
+    	shell: 'samtools index {input}'   
+
+rule salmon:
+    input: aln = 'alignments/{name}.sorted.t.bam', ref='../refs/GRCh38.p13.Toledo.transcripts.fa'
+    output: 'stats/salmon_quant_{name}/quant.sf'
+    params: 'stats/salmon_quant_{name}/'
+    shell:'conda run -n salmon salmon quant -t {input.ref} -l SF -a {input.aln} -o {params}'
+
+rule coverage:
+	input:alignments='alignments/{name}.sorted.v.bam',
+                index='alignments/{name}.sorted.v.bam.bai'
+	output:'stats/{name}.v.cov.txt'
+	shell: 'bedtools genomecov -ibam {input[0]} -dz -split > {output}'
+
+rule compute_coverage:
+    input: 'alignments/{name}.sorted.v.bam'
+    output: 'stats/{name}.{strand}.v.cov.txt'
+    threads: 4
+    shell: 'bedtools genomecov -ibam {input} -split -bg -strand {wildcards.strand} > {output}'
+
+rule bamtobed:
+	input: aln = 'alignments/{name}.sorted.t.bam', index='alignments/{name}.sorted.t.bam.bai'
+	output: 'stats/{name}.t.bed'
+	shell: 'bedtools bamtobed -bed12 -i {input.aln} >{output}'
+
+rule virus_bamtobed:
+	input: aln = 'alignments/{name}.sorted.v.bam', index='alignments/{name}.sorted.v.bam.bai'
+	output: 'stats/{name}.v.bed'
+	shell: 'bedtools bamtobed -bed12 -i {input.aln} >{output}'
+
+rule virus_intersect:
+	input: 'stats/{name}.v.bed'
+	output: 'stats/{name}.v.intersect.bed'
+	shell: 'bedtools intersect -wo  -a {input} -b ../refs/HCMV-Toledo.transcripts.bed > {output}'
+
+def get_readid(bedfile, name, genename):
+	import pandas as pd
+	intersect = pd.read_csv(bedfile, sep='\t', names='chr qs qe name score strand thickStart thickEnd itemRgb blockCount blockSizes blockStarts chr_b bs be name_b type_b strand_b overlap'.split(' '))
+	intersect = intersect['chr qs qe name strand chr_b bs be name_b strand_b overlap'.split(' ')]
+	intersect = intersect[intersect['name_b']==f'rna-{genename}']
+	intersect = intersect[intersect['strand']==intersect['strand_b']]
+	lnccolors = {
+		'RNA2.7': [2362, 4874, 4874-2362, '#82c91e'],
+		'RNA1.2': [6634, 7684, 7684-6634, '#3bc9db'],
+    		'RNA4.9': [93949, 98873, 98873-93949, '#e64980'],
+    		'RNA5.0': [155744,  161422, 161422-155744 , '#ffd43b']
+		}
+	lncanno = pd.DataFrame(lnccolors, index='start end length color'.split(' '))
+	covanno = pd.DataFrame([0.8, 0.8, 0.3, 0.1], index='RNA2.7 RNA1.2 RNA4.9 RNA5.0'.split(' '), columns=['cov'])
+	covanno_lytic = pd.DataFrame([0.8, 0.8, 0.8, 0.1], index='RNA2.7 RNA1.2 RNA4.9 RNA5.0'.split(' '), columns=['cov'])
+	if name =='hcmv_lytic_1':
+		intersect = intersect[intersect['overlap']>=lncanno.loc['length',genename]*covanno_lytic.loc[genename, 'cov']]
+	else: 
+		intersect = intersect[intersect['overlap']>=lncanno.loc['length',genename]*covanno.loc[genename, 'cov']]
+	return(list(intersect['name']))
+	
+	
+
+rule get_lnc_ids:
+	input: 'stats/{name}.v.intersect.bed'
+	output: 'trannot/{name}_{lnc_name}.idx.txt'
+	run: 
+		readids = get_readid(input[0], wildcards.name, wildcards.lnc_name) 
+        	with open(output[0], 'w') as outpfile:
+            		for line in readids:
+               			print(line, file=outpfile) 
+
+		
+rule subsample_guppy:
+	input: 'raw_link/{name}/sequencing_summary.txt'
+	output: ids = 'trannot/{name}.subidx.txt', seqsum='guppy_subset/{name}/sequencing_summary.txt'
+	params:
+		inputdir='raw_link/{name}/',
+		outputdir='guppy_subset/{name}/'
+	threads: 10
+	run:
+		if wildcards.name in 'hcmv_latent_1 hcmv_latent_2 hcmv_react_1 hcmv_react_2'.split(' '):
+			all_id = open(f'trannot/{wildcards.name}.idx.txt').read().split()
+			subset_ids = open(f'trannot/{wildcards.name[:-2]}.subidx.txt').read().split()
+			subset_id = sorted(list(set(all_id)&set(subset_ids)))
+			print('\n'.join(subset_id), file=open(output.ids, 'w'))
+		else: 
+			shell('cp trannot/hcmv_lytic.subidx.txt {output.ids}')
+		shell('~/nanopore-tools/fast5-managing/subset-multi-fast5/subset-multi-fast5.py \
+			-i {params.inputdir} -o {params.outputdir} -l {output.ids}\
+			-f {wildcards.name} -p {threads} --guppy')
+		
+		
+rule multi_to_single:
+	input: 'guppy_subset/{name}/sequencing_summary.txt'
+	output: 'guppy_subset/{name}_single/sequencing_summary.txt'
+   	params:
+		inputdir='guppy_subset/{name}/',
+		outputdir='guppy_subset/{name}_single/'
+	threads: 6
+	run:
+		shell('multi_to_single_fast5 -i {params.inputdir} -s {params.outputdir} --recursive -t {threads}')
+		shell('cp {params.inputdir}/sequencing_summary.txt \
+                    {params.outputdir}/sequencing_summary.txt')
+
+CORRECTED_GROUP=2021
+rule resquiggle:
+	input: 'guppy_subset/{name}_single/sequencing_summary.txt'
+	output: 'guppy_subset/{name}_single/.tombo.CoV.indexed'
+	threads: 20
+	params: inputdir='guppy_subset/{name}_single'
+	run:
+		shell('conda run -n npworks tombo resquiggle --rna \
+			--corrected-group {CORRECTED_GROUP} --overwrite\
+			--processes {threads} --num-most-common-errors 5 \
+			{params.inputdir} {REFERENCE_SEQUENCE}')
+		shell('touch {output}')
+
+rule model_compare:
+	output: 
+		aggstats='tombo/{type}.stats/modelcompare.all.tombo.stats',
+		perreadstats='tombo/{type}.stats/modelcompare.tombo.per_read_stats'
+	params: 
+		agg_prefix='tombo/{type}.stats/modelcompare.all',
+                perread_prefix='tombo/{type}.stats/modelcompare',
+                #target_dir='guppy_subset/{type}_single/',
+                control_dir='guppy_subset/hcmv_ivt_1_single/'
+	run:
+		if type in 'hcmv_latent hcmv_react'.split(' '):
+			target_dir = 'guppy_subset/{wildcards.type}_1_single guppy_subset/{wildcards.type}_2_single'
+			
+	                shell('conda run -n npworks tombo detect_modifications model_sample_compare \
+        	                --rna --fast5-basedirs {target_dir} \
+                	        --statistics-file-basename {params.agg_prefix} \
+                        	--control-fast5-basedirs {params.control_dir} \
+                        	--num-most-significant-stored 200 --processes {threads} \
+                        	--per-read-statistics-basename {params.perread_prefix} \
+                        	--corrected-group {CORRECTED_GROUP}')
+		else:
+			target_dir = 'guppy_subset/{wildcards.type}_1_single'
+			shell('conda run -n npworks tombo detect_modifications model_sample_compare \
+                                --rna --fast5-basedirs {target_dir} \
+                                --statistics-file-basename {params.agg_prefix} \
+                                --control-fast5-basedirs {params.control_dir} \
+                                --num-most-significant-stored 200 --processes {threads} \
+                                --per-read-statistics-basename {params.perread_prefix} \
+                                --corrected-group {CORRECTED_GROUP}')
+rule poreplex:
+    input:'raw_link/{name}/sequencing_summary.txt'
+    output:'poreplex/{name}/sequencing_summary.txt'
+    threads:20
+    params: inputdir='raw_link/{name}',
+            outputdir='poreplex/{name}'
+    shell: 'conda run -n npworks poreplex -p {threads} -i {params.inputdir} -o {params.outputdir} -y \
+                --trim-adapter --dump-basecalled-events --polya'
+
+
+rule eligos_pairdiff:
+	input: tbam='alignments/{name}.sorted.v.bam', cbam='alignments/hcmv_ivt_1.sorted.v.bam',
+		reg='../refs/HCMV-Toledo.lnc.bed'
+	output: combine='eligos2/pairdiff/{name}/combine.txt',
+		baseexts=expand('eligos2/pairdiff/{{name}}/baseExt{extlen}.txt', extlen=[0, 1, 2])
+	threads: 20
+	params: outputdir='eligos2/pairdiff/{name}'
+	run: 
+		ctl = 'hcmv_ivt_1.sorted.v'
+		outputpfx = f'{params.outputdir}/{wildcards.name}.sorted.v_vs_{ctl}_on_HCMV-Toledo.lnc_'
+	    	shell('conda run -n eligos2 ~/eligos2/eligos2 pair_diff_mod \
+			-tbam {input.tbam} -cbam {input.cbam} \
+			-reg {input.reg} -ref {REFERENCE_SEQUENCE} -t {threads} \
+                    	--pval 0.001 --oddR 1.2 --esb 0 \
+                    	-o {params.outputdir}')
+        	for outputfile in output:
+            		basename = outputfile.split('/')[-1]
+            		shell('ln {outputpfx}{basename} {params.outputdir}/{basename}')
+		shell('rm -r {params.outputdir}/tmp')
+
+rule filter_eligos_pairdiff:
+    input: 'eligos2/pairdiff/{name}/{diffname}.txt'
+    output: 'eligos2/pairdiff/{name}/{diffname}.filtered.txt'
+    shell: 'conda run -n eligos2 ~/eligos2/eligos2\
+		 filter -i {input}  --homopolymer --esb 0 \
+            --oddR 1.2 --pval 0.001'
+
+rule nanopolish_all_index:
+	input: seqsum='raw_link/{name}/sequencing_summary.txt',
+		seq='sequences/{name}.viral.fastq.gz',
+		aln='alignments/{name}.v.sorted.bam'
+	output: 'sequences/{name}.viral.fastq.gz.index'
+	threads: 10
+	params: inputdir='raw_link/{name}/workspace/', 
+	run: 
+      		shell('conda run -n nanopolish nanopolish index -s {input.seqsum} -d {params.inputdir} {input.seq}')
+
+rule nanopolish_polyA:
+	input: 	ind='sequences/{name}.viral.fastq.gz.index',
+		seq='sequences/{name}.viral.fastq.gz',
+                aln='alignments/{name}.v.sorted.bam'
+	output:'nanopolish_all/{name}/polyA.tsv'
+	threads:8
+	shell:'conda run -n nanopolish nanopolish polya -t 8 -r {input.seq} -b {input.aln} -g {REFERENCE_SEQUENCE} > {output}'
+rule nanopolish_eventalign:
+        input: seqsum='guppy_subset/{name}/sequencing_summary.txt',
+                lncseq='sequence_subset/{name}.lnc.fastq.gz',
+                subaln='alignment_subset/{name}.lnc.sorted.bam'
+        output: eventalign='nanocompore/{name}/eventalign_reads.tsv', summary='nanocompore/{name}/summary.txt'
+        threads: 10
+        params: inputdir='guppy_subset/{name}/workspace/', 
+        run: 
+                shell('conda run -n nanopolish nanopolish index -s {input.seqsum} -d {params.inputdir} {input.lncseq}')
+                shell('conda run -n nanopolish nanopolish eventalign -t {threads} -r {input.lncseq} -b {input.subaln} -g ../refs/HCMV-Toledo.fasta --summary={output.summary} --samples --scale-events -n > {output.eventalign}')
+
+
+
+rule nanocompore_index:
+	input: 'nanocompore/{name}/eventalign_reads.tsv'
+	output: 'nanocompore/{name}/eventalign_collapsed.tsv'
+	threads: 6
+	shell: 'conda run -n nanocompore nanocompore eventalign_collapse --progress -w -t {threads} -i {input} -o {output}'
+
+'''
+rule model_compare:
+	input:  'guppy_subset/{name}_single/.tombo.CoV.indexed'
+	output: aggstats='tombo/{name}.stats/modelcompare.all.tombo.stats',
+		perreadstats='tombo/{name}.stats/modelcompare.tombo.per_read_stats'
+	params: agg_prefix='tombo/{name}.stats/modelcompare.all',
+		perreads_prefix='tombo/{name}.stats/modelcompare',
+		target_dir='guppy_subset/{name}_single/',
+		control_dir='guppy_subset/hcmv_ivt_1_single/'
+	run: 
+		shell('conda run -n npworks tombo detect_modifications model_sample_compare \
+                	--rna --fast5-basedirs {target_dir} \
+                	--statistics-file-basename {params.agg_prefix} \
+                	--control-fast5-basedirs {control_dir} \
+                	--num-most-significant-stored 200 --processes {threads} \
+                	--per-read-statistics-basename {params.perread_prefix} \
+                	--corrected-group {corrected_group}')
+'''
+#nanocompore sampcomp --file_list1 nanocompore/hcmv_latent_1/eventalign_collapsed.tsv/out_eventalign_collapse.tsv,nanocompore/hcmv_latent_2/eventalign_collapsed.tsv/out_eventalign_collapse.tsv --file_list2 nanocompore/hcmv_ivt_1/eventalign_collapsed.tsv/out_eventalign_collapse.tsv --label1 hcmv_latent --label2 hcmv_ivt -f ../refs/HCMV-Toledo.fasta --outpath nanocompore/hcmv_latent/ -w
+

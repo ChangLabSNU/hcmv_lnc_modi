@@ -1,0 +1,75 @@
+SAMPLES = """
+    Enrich_Latent_1
+    Enrich_Latent_2
+    Enrich_React_1
+    Enrich_React_2
+    Total_Latent_1
+    Total_Latent_2
+    Total_React_1
+    Total_React_2
+""".split()
+
+
+STAR_INDEX = '../refs/GRCh38.p13.Toledo.star/'
+STAR_OPTIONS = ''
+
+GENE_ANNOTATION = '../refs/GRCh38.p13.Toledo.gff3'
+KALLISTO_INDEX = '../refs/GRCh38.p13.Toledo.transcripts'
+
+rule all:
+    input:
+        expand('alignments/{name}.bam.bai', name=SAMPLES),
+        expand('tables/r00counts-{name}.txt', name=SAMPLES),
+        expand('stats/{name}_rsem.isoforms.results', name=SAMPLES),
+#        expand('quant/{name}/abundance.tsv', name=SAMPLES)
+
+'''
+rule align_reads:
+    input:
+        r1='rawdata/{name}_1.fastq.zst',
+        r2='rawdata/{name}_2.fastq.zst'
+    output: 'alignments/{name}.bam'
+    params: stardir='alignments/{name}.star'
+    threads: 20
+    shell: 'mkdir -p {params.stardir}; \
+            STAR --runThreadN {threads} --genomeDir {STAR_INDEX} \
+                --readFilesIn {input.r2} {input.r1} \
+                --readFilesCommand zstdcat \
+                {STAR_OPTIONS} \
+                --outFileNamePrefix {params.stardir}/ \
+                --outSAMmultNmax 32 \
+                --outSAMtype BAM SortedByCoordinate \
+                --outSAMunmapped Within KeepPairs \
+                --sjdbGTFfile {GENE_ANNOTATION} \
+                --quantMode GeneCounts && \
+            ln {params.stardir}/Aligned.sortedByCoord.out.bam {output}'
+'''
+
+rule index:
+    input: 'alignments/{name}.bam'
+    output: 'alignments/{name}.bam.bai'
+    shell: 'samtools index {input}'
+rule count_features:
+    input: 'alignments/{name}.bam'
+    output: 'tables/r00counts-{name}.txt'
+    shell: 'htseq-count {input} {GENE_ANNOTATION} > {output}'
+
+RSEM_REF='../refs/GRCh38.p13.Toledo.transcripts.rsem'
+rule rsem_calculation:
+    input: bam= 'alignments/{name}.bam', bai='alignments/{name}.bam.bai'
+    output: 'stats/{name}_rsem.isoforms.results'
+    threads: 10
+    shell: 'conda run -n rsem rsem-calculate-expression --paired-end\
+            --alignments -p {threads}\
+            {input.bam} {RSEM_REF} {wildcards.name}'
+rule run_kallisto:
+    input:
+        r1='rawdata/{name}_1.fastq.zst',
+        r2='rawdata/{name}_2.fastq.zst'
+    output: 'quant/{name}/abundance.tsv'
+    params: outputdir='quant/{name}'
+    threads: 36
+    shell: 'kallisto quant -o {params.outputdir} -i {KALLISTO_INDEX} \
+             --rf-stranded -t {threads} \
+             <(zstdcat {input.r1}) <(zstdcat {input.r2}) '
+
