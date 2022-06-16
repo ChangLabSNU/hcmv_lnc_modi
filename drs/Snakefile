@@ -1,4 +1,4 @@
-REFERENCE_SEQUENCE = '/qbio/nest/ari/works/hcmv/refs/HCMV-Toledo.fasta'
+REFERENCE_SEQUENCE = '../refs/HCMV-Toledo.fasta'
 REFERENCE_INDEX='../refs/GRCh38.p13.Toledo.ont.hv.mm2.idx'
 
 import pandas as pd
@@ -47,6 +47,12 @@ strand=['+', '-']),
 		#expand('python_output/mapped_{name}_{pos}.pickle', name=SAMPLES, pos=POS),
 		#expand('eligos2/pairdiff/{type}/combine.txt', type=TYPES),
       		#expand('eligos2/pairdiff/{type}/{diffname}.filtered.txt', type=TYPES, diffname=ELIGOS_OUTPUT_TYPES),
+
+
+
+
+
+
 rule align_genome:
 	input:'sequences/{name}.fastq.gz'
     	output: 'alignments/{name}.sorted.bam'
@@ -59,6 +65,7 @@ rule index:
     	output: 'alignments/{name}.sorted.bam.bai'
     	shell: 'samtools index {input}'
 viral_genome = 'GU937742.2'
+
 rule make_viral_subset:
 	input: allreads='sequences/{name}.fastq.gz', 
 		alignments='alignments/{name}.sorted.bam',
@@ -70,6 +77,7 @@ rule make_viral_subset:
                     uniq > {output.readids}')
 		shell('seqtk subseq {input.allreads} {output.readids} | \
                    bgzip -@ {threads} -c /dev/stdin > {output.subsetfastq}')
+
 rule featurecount:
 	input: 'alignments/{name}.sorted.bam'
 	output: 'subread/{name}_count'
@@ -303,6 +311,7 @@ rule nanopolish_polyA:
 	output:'nanopolish_all/{name}/polyA.tsv'
 	threads:8
 	shell:'conda run -n nanopolish nanopolish polya -t 8 -r {input.seq} -b {input.aln} -g {REFERENCE_SEQUENCE} > {output}'
+
 rule nanopolish_eventalign:
         input: seqsum='guppy_subset/{name}/sequencing_summary.txt',
                 lncseq='sequence_subset/{name}.lnc.fastq.gz',
@@ -316,29 +325,5 @@ rule nanopolish_eventalign:
 
 
 
-rule nanocompore_index:
-	input: 'nanocompore/{name}/eventalign_reads.tsv'
-	output: 'nanocompore/{name}/eventalign_collapsed.tsv'
-	threads: 6
-	shell: 'conda run -n nanocompore nanocompore eventalign_collapse --progress -w -t {threads} -i {input} -o {output}'
 
-'''
-rule model_compare:
-	input:  'guppy_subset/{name}_single/.tombo.CoV.indexed'
-	output: aggstats='tombo/{name}.stats/modelcompare.all.tombo.stats',
-		perreadstats='tombo/{name}.stats/modelcompare.tombo.per_read_stats'
-	params: agg_prefix='tombo/{name}.stats/modelcompare.all',
-		perreads_prefix='tombo/{name}.stats/modelcompare',
-		target_dir='guppy_subset/{name}_single/',
-		control_dir='guppy_subset/hcmv_ivt_1_single/'
-	run: 
-		shell('conda run -n npworks tombo detect_modifications model_sample_compare \
-                	--rna --fast5-basedirs {target_dir} \
-                	--statistics-file-basename {params.agg_prefix} \
-                	--control-fast5-basedirs {control_dir} \
-                	--num-most-significant-stored 200 --processes {threads} \
-                	--per-read-statistics-basename {params.perread_prefix} \
-                	--corrected-group {corrected_group}')
-'''
-#nanocompore sampcomp --file_list1 nanocompore/hcmv_latent_1/eventalign_collapsed.tsv/out_eventalign_collapse.tsv,nanocompore/hcmv_latent_2/eventalign_collapsed.tsv/out_eventalign_collapse.tsv --file_list2 nanocompore/hcmv_ivt_1/eventalign_collapsed.tsv/out_eventalign_collapse.tsv --label1 hcmv_latent --label2 hcmv_ivt -f ../refs/HCMV-Toledo.fasta --outpath nanocompore/hcmv_latent/ -w
 
